@@ -468,6 +468,11 @@ describe("jsonToDate and dateToJson", () => {
 
   let dateToJsonCases = [
     [
+      // A date never gets a time or a time zone, even with a stray tzid
+      { date: "2024-01-01" },
+      ["dtstart", { tzid: "Europe/Berlin" }, "date", "2024-01-01"]
+    ],
+    [
       { dateTime: "2024-01-01T01:02:03.456+01:00", timeZone: "Europe/Berlin" },
       ["dtstart", { tzid: "W. Europe Standard Time" }, "date-time", "2024-01-01T01:02:03"]
     ]
@@ -685,8 +690,8 @@ describe("itemToJson", () => {
   test("tasks", async () => {
     let data = itemToJson(jcalItems.simple_task, calendar, false);
     expect(data).toEqual({
-      due: "2006-06-10",
-      completed: "2006-06-11",
+      due: "2006-06-10T00:00:00Z",
+      completed: "2006-06-11T00:00:00Z",
       id: "lqohjsbhqoztdkusnpruvooacn",
       status: "needsAction",
       title: "New Task",
@@ -1205,6 +1210,80 @@ describe("patchItem", () => {
         expect(changes.end).toEqual({ dateTime: "2006-06-10T10:00:00", timeZone: "Europe/Berlin" });
       });
     });
+
+    describe("all day event", () => {
+      beforeEach(() => {
+        oldItem = copy(jcalItems.valarm_no_default_override);
+        item = copy(oldItem);
+        event = new ICAL.Component(item.item).getFirstSubcomponent("vevent");
+      });
+
+      test("dates changed", () => {
+        event.updatePropertyWithValue("dtstart", ICAL.Time.fromDateString("2006-06-12"));
+        event.updatePropertyWithValue("dtend", ICAL.Time.fromDateString("2006-06-14"));
+
+        changes = patchItem(item, oldItem);
+        expect(changes).toEqual({
+          start: { date: "2006-06-12" },
+          end: { date: "2006-06-14" },
+        });
+      });
+
+      test("duration instead of dtend", () => {
+        event.removeProperty("dtend");
+        event.updatePropertyWithValue("duration", ICAL.Duration.fromString("P2D"));
+
+        changes = patchItem(item, oldItem);
+        expect(changes).toEqual({ end: { date: "2006-06-12" } });
+      });
+
+      test("timed event becomes all day", () => {
+        oldItem = copy(jcalItems.simple_event);
+        item = copy(oldItem);
+        event = new ICAL.Component(item.item).getFirstSubcomponent("vevent");
+
+        for (let [jprop, value] of [["dtstart", "2006-06-10"], ["dtend", "2006-06-11"]]) {
+          let prop = event.getFirstProperty(jprop);
+          prop.removeParameter("tzid");
+          prop.resetType("date");
+          prop.setValue(ICAL.Time.fromDateString(value));
+        }
+
+        changes = patchItem(item, oldItem);
+        expect(changes.start).toEqual({ date: "2006-06-10" });
+        expect(changes.end).toEqual({ date: "2006-06-11" });
+      });
+
+      test("recurring event gets no time zone", () => {
+        oldItem = copy(jcalItems.recur_rrule);
+        item = copy(oldItem);
+        event = new ICAL.Component(item.item).getFirstSubcomponent("vevent");
+        event.updatePropertyWithValue("dtstart", ICAL.Time.fromDateString("2006-06-12"));
+        event.updatePropertyWithValue("dtend", ICAL.Time.fromDateString("2006-06-13"));
+
+        changes = patchItem(item, oldItem);
+        expect(changes).toEqual({
+          start: { date: "2006-06-12" },
+          end: { date: "2006-06-13" },
+        });
+      });
+
+      test("modified occurrence", () => {
+        oldItem = copy(jcalItems.recur_instance);
+        item = copy(oldItem);
+        event = new ICAL.Component(item.item).getFirstSubcomponent("vevent");
+        event.updatePropertyWithValue("dtstart", ICAL.Time.fromDateString("2006-06-27"));
+        event.updatePropertyWithValue("dtend", ICAL.Time.fromDateString("2006-06-28"));
+
+        changes = patchItem(item, oldItem);
+        expect(changes).toEqual({
+          recurringEventId: "osndfnwejrgnejnsdjfwegjdfr",
+          start: { date: "2006-06-27" },
+          end: { date: "2006-06-28" },
+          originalStartTime: { date: "2006-06-25" },
+        });
+      });
+    });
   });
 
   describe("patchTask", () => {
@@ -1219,8 +1298,8 @@ describe("patchItem", () => {
     test.each([
       ["summary", "title", "changed", "changed"],
       ["description", "notes", "changed", "changed"],
-      ["due", "due", "2008-01-01", "2008-01-01"],
-      ["completed", "completed", "2008-01-01", "2008-01-01"],
+      ["due", "due", "2008-01-01", "2008-01-01T00:00:00Z"],
+      ["completed", "completed", "2008-01-01", "2008-01-01T00:00:00Z"],
       ["status", "status", "COMPLETED", "completed"],
     ])("prop %s", (jprop, prop, jchanged, changed) => {
       task.updatePropertyWithValue(jprop, jchanged);
@@ -1239,6 +1318,36 @@ describe("patchItem", () => {
 
         changes = patchItem(item, oldItem);
         expect(changes).toEqual({ due: "2025-05-09T01:02:03-07:00" });
+    });
+
+    test("due date keeps the day east of UTC", () => {
+      // Local midnight in Kathmandu is the previous day in UTC, the tasks api would keep that day.
+      messenger.calendar.timezones._currentZone = "Asia/Kathmandu";
+      task.updatePropertyWithValue("due", ICAL.Time.fromDateString("2025-12-31"));
+
+      changes = patchItem(item, oldItem);
+      expect(changes).toEqual({ due: "2025-12-31T00:00:00Z" });
+    });
+
+    test("due date does not need the current zone", () => {
+      Object.defineProperty(messenger.calendar.timezones, "currentZone", {
+        get() {
+          throw new Error("The current zone is not needed for dates");
+        }
+      });
+      task.updatePropertyWithValue("due", ICAL.Time.fromDateString("2025-12-31"));
+
+      changes = patchItem(item, oldItem);
+      expect(changes).toEqual({ due: "2025-12-31T00:00:00Z" });
+    });
+
+    test("completed with time in UTC", () => {
+      let completed = task.getFirstProperty("completed");
+      completed.resetType("date-time");
+      completed.setValue(ICAL.Time.fromDateTimeString("2025-05-09T01:02:03Z"));
+
+      changes = patchItem(item, oldItem);
+      expect(changes).toEqual({ completed: "2025-05-09T01:02:03Z" });
     });
   });
 

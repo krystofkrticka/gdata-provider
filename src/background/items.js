@@ -402,6 +402,15 @@ export function patchItem(item, oldItem, isImport, isCreate) {
   }
 }
 
+function toTaskTimestamp(dateTime) {
+  if (dateTime.isDate) {
+    // The tasks api rejects a plain date, it needs a timestamp. It only keeps the date part of the
+    // due date, so send midnight UTC to keep the same day.
+    return dateTime.toString() + "T00:00:00Z";
+  }
+  return toRFC3339(dateTime);
+}
+
 function patchTask(item, oldItem, isImport, isCreate) {
   function setIfFirstProperty(obj, prop, jprop, transform = null) {
     let oldValue = oldTask.getFirstPropertyValue(jprop);
@@ -422,8 +431,8 @@ function patchTask(item, oldItem, isImport, isCreate) {
   });
   setIfFirstProperty(entry, "notes", "description");
 
-  setIfFirstProperty(entry, "due", "due", toRFC3339);
-  setIfFirstProperty(entry, "completed", "completed", toRFC3339);
+  setIfFirstProperty(entry, "due", "due", toTaskTimestamp);
+  setIfFirstProperty(entry, "completed", "completed", toTaskTimestamp);
 
   return entry;
 }
